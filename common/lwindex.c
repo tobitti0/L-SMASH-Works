@@ -2119,7 +2119,9 @@ static int create_index
     if( !vtp )
         return -1;
     for( int i = 0; i < vdhp->nb_streams; i++ )
+    {
         vtp[i].last_keyframe_pts = AV_NOPTS_VALUE;
+    }
 
     audio_stream_temp_t *atp = (audio_stream_temp_t *)lw_malloc_zero( adhp->nb_streams * sizeof(audio_stream_temp_t) );
     if( !atp )
@@ -2133,6 +2135,10 @@ static int create_index
         vdhp->stream_info_list[i] = (video_stream_info_t *)lw_malloc_zero( sizeof(video_stream_info_t) );
         if( !vdhp->stream_info_list[i] )
             goto fail_index;
+        vdhp->stream_info_list[i]->codec_id           = AV_CODEC_ID_NONE;
+        vdhp->stream_info_list[i]->initial_pix_fmt    = AV_PIX_FMT_NONE;
+        vdhp->stream_info_list[i]->initial_colorspace = AVCOL_SPC_NB;
+        vdhp->stream_info_list[i]->dv_in_avi_stream_index = -1;
     }
     adhp->stream_info_list = (audio_stream_info_t **)lw_malloc_zero( adhp->nb_streams * sizeof(audio_stream_info_t *) );
     if( !adhp->stream_info_list )
@@ -2143,6 +2149,8 @@ static int create_index
         adhp->stream_info_list[i] = (audio_stream_info_t *)lw_malloc_zero( sizeof(audio_stream_info_t) );
         if( !adhp->stream_info_list[i] )
             goto fail_index;
+        adhp->stream_info_list[i]->codec_id               = AV_CODEC_ID_NONE;
+        adhp->stream_info_list[i]->dv_in_avi_stream_index = -1;
     }
 
     int32_t video_index_pos = 0;
@@ -2203,6 +2211,96 @@ static int create_index
     };
     while( read_av_frame( format_ctx, &pkt ) >= 0 )
     {
+        if( pkt.stream_index >= vdhp->nb_streams || pkt.stream_index >= adhp->nb_streams )
+        {
+            uint32_t old_nb_streams = vdhp->nb_streams;
+            uint32_t new_nb_streams = format_ctx->nb_streams;
+            if( pkt.stream_index >= new_nb_streams )
+                new_nb_streams = pkt.stream_index + 1;
+            video_stream_temp_t *new_vtp = (video_stream_temp_t *)realloc( vtp, new_nb_streams * sizeof(video_stream_temp_t) );
+            if( !new_vtp )
+            {
+                av_packet_unref( &pkt );
+                goto fail_index;
+            }
+            vtp = new_vtp;
+            if( new_nb_streams > old_nb_streams )
+            {
+                memset( vtp + old_nb_streams, 0, (new_nb_streams - old_nb_streams) * sizeof(video_stream_temp_t) );
+                for( uint32_t i = old_nb_streams; i < new_nb_streams; i++ )
+                    vtp[i].last_keyframe_pts = AV_NOPTS_VALUE;
+            }
+            audio_stream_temp_t *new_atp = (audio_stream_temp_t *)realloc( atp, new_nb_streams * sizeof(audio_stream_temp_t) );
+            if( !new_atp )
+            {
+                av_packet_unref( &pkt );
+                goto fail_index;
+            }
+            atp = new_atp;
+            if( new_nb_streams > old_nb_streams )
+                memset( atp + old_nb_streams, 0, (new_nb_streams - old_nb_streams) * sizeof(audio_stream_temp_t) );
+            video_stream_info_t **new_video_info_list
+                = (video_stream_info_t **)realloc( vdhp->stream_info_list, new_nb_streams * sizeof(video_stream_info_t *) );
+            if( !new_video_info_list )
+            {
+                av_packet_unref( &pkt );
+                goto fail_index;
+            }
+            vdhp->stream_info_list = new_video_info_list;
+            if( new_nb_streams > old_nb_streams )
+            {
+                memset( vdhp->stream_info_list + old_nb_streams, 0,
+                        (new_nb_streams - old_nb_streams) * sizeof(video_stream_info_t *) );
+                for( uint32_t i = old_nb_streams; i < new_nb_streams; i++ )
+                {
+                    vdhp->stream_info_list[i] = (video_stream_info_t *)lw_malloc_zero( sizeof(video_stream_info_t) );
+                    if( !vdhp->stream_info_list[i] )
+                    {
+                        for( uint32_t j = old_nb_streams; j < i; j++ )
+                            lw_freep( &vdhp->stream_info_list[j] );
+                        av_packet_unref( &pkt );
+                        goto fail_index;
+                    }
+                    vdhp->stream_info_list[i]->codec_id           = AV_CODEC_ID_NONE;
+                    vdhp->stream_info_list[i]->initial_pix_fmt    = AV_PIX_FMT_NONE;
+                    vdhp->stream_info_list[i]->initial_colorspace = AVCOL_SPC_NB;
+                    vdhp->stream_info_list[i]->dv_in_avi_stream_index = -1;
+                }
+            }
+            audio_stream_info_t **new_audio_info_list
+                = (audio_stream_info_t **)realloc( adhp->stream_info_list, new_nb_streams * sizeof(audio_stream_info_t *) );
+            if( !new_audio_info_list )
+            {
+                if( new_nb_streams > old_nb_streams )
+                    for( uint32_t i = old_nb_streams; i < new_nb_streams; i++ )
+                        lw_freep( &vdhp->stream_info_list[i] );
+                av_packet_unref( &pkt );
+                goto fail_index;
+            }
+            adhp->stream_info_list = new_audio_info_list;
+            if( new_nb_streams > old_nb_streams )
+            {
+                memset( adhp->stream_info_list + old_nb_streams, 0,
+                        (new_nb_streams - old_nb_streams) * sizeof(audio_stream_info_t *) );
+                for( uint32_t i = old_nb_streams; i < new_nb_streams; i++ )
+                {
+                    adhp->stream_info_list[i] = (audio_stream_info_t *)lw_malloc_zero( sizeof(audio_stream_info_t) );
+                    if( !adhp->stream_info_list[i] )
+                    {
+                        for( uint32_t j = old_nb_streams; j < new_nb_streams; j++ )
+                            lw_freep( &vdhp->stream_info_list[j] );
+                        for( uint32_t j = old_nb_streams; j < i; j++ )
+                            lw_freep( &adhp->stream_info_list[j] );
+                        av_packet_unref( &pkt );
+                        goto fail_index;
+                    }
+                    adhp->stream_info_list[i]->codec_id               = AV_CODEC_ID_NONE;
+                    adhp->stream_info_list[i]->dv_in_avi_stream_index = -1;
+                }
+            }
+            vdhp->nb_streams = new_nb_streams;
+            adhp->nb_streams = new_nb_streams;
+        }
         AVStream          *stream   = format_ctx->streams[ pkt.stream_index ];
         AVCodecParameters *codecpar = stream->codecpar;
         if( codecpar->codec_type != AVMEDIA_TYPE_VIDEO
@@ -2871,6 +2969,18 @@ static int create_index
     return 0;
 fail_index:
     cleanup_index_helpers( &indexer, format_ctx );
+    if( vdhp->stream_info_list )
+    {
+        for( int i = 0; i < vdhp->nb_streams; i++ )
+            lw_freep( &vdhp->stream_info_list[i] );
+        lw_freep( &vdhp->stream_info_list );
+    }
+    if( adhp->stream_info_list )
+    {
+        for( int i = 0; i < adhp->nb_streams; i++ )
+            lw_freep( &adhp->stream_info_list[i] );
+        lw_freep( &adhp->stream_info_list );
+    }
     if( vtp )
     {
         for( int i = 0; i < vdhp->nb_streams; i++ )
